@@ -79,6 +79,10 @@ export function createVapiWebhookRoute(deps: VapiWebhookDeps): Hono {
         return c.json(result, 503);
       }
 
+      // `send_rejected` deliberately answers 200: the customer is permanently
+      // unreachable, so a Vapi retry would only repeat the failure. The owner
+      // has been told to call back instead.
+
       return c.json(result, 200);
     } catch (error) {
       logger.error('vapi webhook handler failed', {

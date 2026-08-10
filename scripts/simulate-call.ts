@@ -36,7 +36,14 @@ function describe(result: HandleResult): string {
         (result.ownerNotified ? '' : ', Owner-Benachrichtigung fehlgeschlagen')
       );
     case 'send_failed':
-      return `Versand fehlgeschlagen für ${result.recoveryId}: ${result.error}`;
+      return `Versand fehlgeschlagen für ${result.recoveryId}: ${result.error} (Wiederholung folgt)`;
+    case 'send_rejected':
+      return (
+        `dauerhaft unzustellbar — ${result.recoveryId} geschlossen (${result.code}), ` +
+        (result.ownerNotified
+          ? 'Owner wurde zum Rückruf aufgefordert'
+          : 'ACHTUNG: auch der Owner konnte nicht benachrichtigt werden')
+      );
   }
 }
 

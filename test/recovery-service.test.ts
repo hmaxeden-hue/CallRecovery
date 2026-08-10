@@ -9,6 +9,7 @@ import {
 import type { IncomingCallEvent } from '../src/core/types.js';
 import { InMemoryPersistence } from '../src/interfaces/persistence/in-memory-persistence.js';
 import { RecoveryIdConflictError } from '../src/interfaces/persistence/persistence-port.js';
+import { MessagingError } from '../src/interfaces/messaging/messaging-port.js';
 import { RecordingMessaging } from './fakes/recording-messaging.js';
 
 const OWNER_PHONE = '+41790000000';
@@ -249,6 +250,102 @@ describe('RecoveryService.handle', () => {
       expect(persistence.listRecoveries()).toHaveLength(1);
       expect(persistence.listRecoveries()[0]?.status).toBe('notified');
       expect(messaging.customerMessages).toHaveLength(1);
+    });
+  });
+
+  describe('permanently undeliverable customer', () => {
+    const notOnWhatsapp = () =>
+      new MessagingError('recipient is not a WhatsApp user', {
+        code: 'not_on_whatsapp',
+        retryable: false,
+      });
+
+    it('closes the recovery and asks the owner to call back', async () => {
+      messaging.failCustomer = notOnWhatsapp();
+      const result = await service.handle(callEvent({ callerName: 'Meier' }));
+
+      expect(result).toEqual({
+        outcome: 'send_rejected',
+        recoveryId: 'R-7F3K',
+        code: 'not_on_whatsapp',
+        ownerNotified: true,
+        error: 'recipient is not a WhatsApp user',
+      });
+
+      // Closed, not pending: nothing will ever retry this one.
+      expect(persistence.listRecoveries()[0]).toMatchObject({
+        status: 'closed',
+        notifiedAt: null, // nobody was notified — the timestamp must not claim otherwise
+      });
+
+      expect(messaging.customerMessages).toHaveLength(0);
+      expect(messaging.ownerMessages).toHaveLength(1);
+      expect(messaging.ownerMessages[0]?.template.key).toBe('owner_undeliverable');
+      expect(messaging.ownerMessages[0]?.body).toContain('WhatsApp nicht zustellbar');
+      expect(messaging.ownerMessages[0]?.body).toContain('Nummer nicht bei WhatsApp registriert');
+      expect(messaging.ownerMessages[0]?.body).toContain('manuell zurückrufen');
+    });
+
+    it('reports it when even the owner fallback fails', async () => {
+      messaging.failCustomer = notOnWhatsapp();
+      messaging.failOwner = new Error('owner unreachable too');
+
+      const result = await service.handle(callEvent());
+
+      expect(result).toMatchObject({ outcome: 'send_rejected', ownerNotified: false });
+      expect(persistence.listRecoveries()[0]?.status).toBe('closed');
+    });
+
+    it('is not triggered by a transient failure', async () => {
+      messaging.failCustomer = new MessagingError('502 from provider', {
+        code: 'provider_unavailable',
+        retryable: true,
+      });
+
+      const result = await service.handle(callEvent());
+
+      expect(result).toMatchObject({ outcome: 'send_failed' });
+      expect(persistence.listRecoveries()[0]?.status).toBe('pending');
+      expect(messaging.ownerMessages).toHaveLength(0);
+    });
+
+    it('treats an unexpected non-provider error as transient', async () => {
+      // A bug during sending must not be mistaken for "customer unreachable"
+      // and close a recovery that a retry could still deliver.
+      messaging.failCustomer = new TypeError('cannot read property of undefined');
+
+      const result = await service.handle(callEvent());
+
+      expect(result).toMatchObject({ outcome: 'send_failed' });
+      expect(persistence.listRecoveries()[0]?.status).toBe('pending');
+    });
+
+    it('lets the customer be reached on a later retry', async () => {
+      messaging.failCustomer = new MessagingError('rate limited', {
+        code: 'rate_limited',
+        retryable: true,
+      });
+      await service.handle(callEvent());
+
+      messaging.failCustomer = null;
+      const retry = await service.handle(callEvent());
+
+      expect(retry).toMatchObject({ outcome: 'notified', retriedPending: true });
+      expect(persistence.listRecoveries()[0]?.status).toBe('notified');
+    });
+  });
+
+  it('hands the adapter both the rendered text and the template', async () => {
+    await service.handle(callEvent({ callerName: 'Meier', partialOrder: { items: ['x'] } }));
+
+    expect(messaging.customerMessages[0]?.template).toEqual({
+      key: 'customer_incomplete_order',
+      language: 'de',
+      variables: ['R-7F3K'],
+    });
+    expect(messaging.ownerMessages[0]?.template).toMatchObject({
+      key: 'owner_lost_order',
+      variables: ['+41791234567', 'Meier', 'Unvollständige Bestellung', 'R-7F3K', '14:32'],
     });
   });
 

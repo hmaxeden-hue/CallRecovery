@@ -13,6 +13,7 @@ import { createRecoveryIdFactory } from '../src/core/recovery-id.js';
 import { RecoveryService } from '../src/core/recovery-service.js';
 import type { IncomingCallEvent } from '../src/core/types.js';
 import { StubMessaging } from '../src/interfaces/messaging/stub-messaging.js';
+import { MessagingError } from '../src/interfaces/messaging/messaging-port.js';
 import { RecoveryIdConflictError } from '../src/interfaces/persistence/persistence-port.js';
 import { SqlitePersistence } from '../src/interfaces/persistence/sqlite-persistence.js';
 
@@ -80,10 +81,41 @@ describe('end-to-end on SQLite', () => {
 
     expect(output).toHaveLength(2);
     expect(output[0]).toContain('channel=customer to=+41791234567 ref=R-7F3K');
+    expect(output[0]).toContain('template=customer_missed_call lang=de {{1}}=R-7F3K');
     expect(output[0]).toContain('wir haben Ihren Anruf leider verpasst');
     expect(output[1]).toContain(`channel=owner to=${OWNER_PHONE}`);
+    expect(output[1]).toContain('template=owner_lost_order');
     expect(output[1]).toContain('Name: Meier');
-    expect(output[1]).toContain('Zeit: 14:32');
+    expect(output[1]).toContain('Zeit: 14:32 Uhr');
+  });
+
+  it('closes an undeliverable recovery on disk and alerts the owner', async () => {
+    // Exercises markClosed through the real SQLite adapter.
+    const failing = new RecoveryService({
+      persistence,
+      messaging: {
+        sendToCustomer: async () => {
+          throw new MessagingError('not a WhatsApp user', {
+            code: 'not_on_whatsapp',
+            retryable: false,
+          });
+        },
+        sendToOwner: async (message) => {
+          output.push(message.body);
+        },
+      },
+      now: () => '2026-08-09T12:33:00.000Z',
+      generateRecoveryId: () => 'R-4TX8',
+      ownerPhone: OWNER_PHONE,
+      timeZone: 'Europe/Zurich',
+    });
+
+    const result = await failing.handle(callEvent({ callId: 'undeliverable-1' }));
+
+    expect(result).toMatchObject({ outcome: 'send_rejected', ownerNotified: true });
+    const [recovery] = persistence.listRecoveries();
+    expect(recovery).toMatchObject({ recoveryId: 'R-4TX8', status: 'closed', notifiedAt: null });
+    expect(output[0]).toContain('Bitte den Kunden manuell zurückrufen.');
   });
 
   it('does not message twice when Vapi retries the same call', async () => {
@@ -195,10 +227,31 @@ describe('SqlitePersistence constraints', () => {
     ).rejects.toBeInstanceOf(RecoveryIdConflictError);
   });
 
-  it('rejects an unknown recovery id on markNotified', async () => {
+  it('rejects an unknown recovery id on markNotified and markClosed', async () => {
     await expect(persistence.recoveries.markNotified('R-XXXX', 'now')).rejects.toThrow(
       /Unknown recovery id/,
     );
+    await expect(persistence.recoveries.markClosed('R-XXXX', 'now')).rejects.toThrow(
+      /Unknown recovery id/,
+    );
+  });
+
+  it('closes a recovery without claiming the customer was notified', async () => {
+    const customer = await persistence.customers.upsertByPhone({ phone: '+41791234567' });
+    await persistence.recoveries.create({
+      recoveryId: 'R-7F3K',
+      customerId: customer.id,
+      callId: 'call-1',
+      reason: 'missed_call',
+      partialOrder: null,
+      createdAt: '2026-08-09T12:33:00.000Z',
+    });
+
+    await persistence.recoveries.markClosed('R-7F3K', '2026-08-09T12:34:00.000Z');
+
+    const [recovery] = persistence.listRecoveries();
+    expect(recovery?.status).toBe('closed');
+    expect(recovery?.notifiedAt).toBeNull();
   });
 
   it('generates unbiased ids through crypto.randomInt in the wiring path', () => {

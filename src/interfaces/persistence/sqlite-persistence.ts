@@ -199,6 +199,14 @@ export class SqlitePersistence implements PersistencePort {
 
       if (result.changes === 0) throw new Error(`Unknown recovery id: ${recoveryId}`);
     },
+
+    markClosed: async (recoveryId: string): Promise<void> => {
+      const result = this.db
+        .prepare<[string]>(`UPDATE call_recoveries SET status = 'closed' WHERE recovery_id = ?`)
+        .run(recoveryId);
+
+      if (result.changes === 0) throw new Error(`Unknown recovery id: ${recoveryId}`);
+    },
   };
 
   /** Read model for the simulation script and tests — not part of the port. */

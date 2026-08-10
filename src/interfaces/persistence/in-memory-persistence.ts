@@ -90,6 +90,12 @@ export class InMemoryPersistence implements PersistencePort {
       if (!recovery) throw new Error(`Unknown recovery id: ${recoveryId}`);
       this.recoveriesById.set(recoveryId, { ...recovery, status: 'notified', notifiedAt });
     },
+
+    markClosed: async (recoveryId: string): Promise<void> => {
+      const recovery = this.recoveriesById.get(recoveryId);
+      if (!recovery) throw new Error(`Unknown recovery id: ${recoveryId}`);
+      this.recoveriesById.set(recoveryId, { ...recovery, status: 'closed' });
+    },
   };
 
   /** Test/debug helper — not part of the port. */

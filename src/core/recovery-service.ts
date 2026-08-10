@@ -12,13 +12,24 @@
  * Only ports are imported. No SQL, no HTTP, no fetch.
  */
 
-import { customerMessage, ownerMessage } from './messages.js';
+import {
+  customerMessage,
+  customerTemplate,
+  ownerMessage,
+  ownerTemplate,
+  ownerUndeliverableMessage,
+  ownerUndeliverableTemplate,
+} from './messages.js';
 import { normalizePhone } from './phone.js';
 import {
   RecoveryIdConflictError,
   type PersistencePort,
 } from '../interfaces/persistence/persistence-port.js';
-import type { MessagingAdapter } from '../interfaces/messaging/messaging-port.js';
+import {
+  classifyMessagingError,
+  type MessagingAdapter,
+  type MessagingFailureCode,
+} from '../interfaces/messaging/messaging-port.js';
 import {
   silentLogger,
   type CallRecovery,
@@ -125,37 +136,61 @@ export class RecoveryService {
 
     const retriedPending = !isNew;
 
+    const customerContext = { reason: recovery.reason, recoveryId: recovery.recoveryId };
+
     try {
       await this.deps.messaging.sendToCustomer({
         toPhone: decision.phone,
-        body: customerMessage({ reason: recovery.reason, recoveryId: recovery.recoveryId }),
+        body: customerMessage(customerContext),
+        template: customerTemplate(customerContext),
         recoveryId: recovery.recoveryId,
       });
     } catch (error) {
-      // Stays `pending`, so the next provider retry picks it up again.
       const message = errorMessage(error);
+      const { retryable, code } = classifyMessagingError(error);
+
       this.logger.error('customer notification failed', {
         callId: event.callId,
         recoveryId: recovery.recoveryId,
+        code,
+        retryable,
         error: message,
       });
-      return { outcome: 'send_failed', recoveryId: recovery.recoveryId, error: message };
+
+      if (retryable) {
+        // Stays `pending`, so the next provider retry picks it up again.
+        return { outcome: 'send_failed', recoveryId: recovery.recoveryId, error: message };
+      }
+
+      // Permanently unreachable — most often a number without WhatsApp. Nobody
+      // will retry this, so a human has to take over, and can only do that if
+      // they hear about it.
+      return this.rejectAndAlertOwner({
+        callId: event.callId,
+        recoveryId: recovery.recoveryId,
+        phone: decision.phone,
+        code,
+        error: message,
+      });
     }
 
     // The customer message is the revenue-relevant one. A failing owner
     // notification is worth logging, never worth discarding a reached customer.
+    const ownerContext = {
+      phone: decision.phone,
+      name: customer.name,
+      reason: recovery.reason,
+      recoveryId: recovery.recoveryId,
+      at: event.endedAt,
+      timeZone: this.deps.timeZone,
+    };
+
     let ownerNotified = true;
     try {
       await this.deps.messaging.sendToOwner({
         toPhone: this.deps.ownerPhone,
-        body: ownerMessage({
-          phone: decision.phone,
-          name: customer.name,
-          reason: recovery.reason,
-          recoveryId: recovery.recoveryId,
-          at: event.endedAt,
-          timeZone: this.deps.timeZone,
-        }),
+        body: ownerMessage(ownerContext),
+        template: ownerTemplate(ownerContext),
         recoveryId: recovery.recoveryId,
       });
     } catch (error) {
@@ -183,6 +218,60 @@ export class RecoveryService {
       reason: recovery.reason,
       retriedPending,
       ownerNotified,
+    };
+  }
+
+  /**
+   * Closes a recovery whose customer cannot be reached and tells the owner to
+   * call back by hand.
+   *
+   * The recovery is closed rather than left pending: nothing will retry it, and
+   * a `pending` row that no one will ever pick up is a lie to phase 3, which
+   * will scan exactly that status for unfinished work.
+   */
+  private async rejectAndAlertOwner(input: {
+    callId: string;
+    recoveryId: string;
+    phone: string;
+    code: MessagingFailureCode;
+    error: string;
+  }): Promise<HandleResult> {
+    const context = { phone: input.phone, recoveryId: input.recoveryId, code: input.code };
+
+    let ownerNotified = true;
+    try {
+      await this.deps.messaging.sendToOwner({
+        toPhone: this.deps.ownerPhone,
+        body: ownerUndeliverableMessage(context),
+        template: ownerUndeliverableTemplate(context),
+        recoveryId: input.recoveryId,
+      });
+    } catch (error) {
+      // Customer unreachable and owner uninformed: the call is now silently
+      // lost, which is the one outcome this system exists to prevent. Loud.
+      ownerNotified = false;
+      this.logger.error('owner fallback notification failed', {
+        callId: input.callId,
+        recoveryId: input.recoveryId,
+        error: errorMessage(error),
+      });
+    }
+
+    await this.deps.persistence.recoveries.markClosed(input.recoveryId, this.deps.now());
+
+    this.logger.warn('recovery closed as undeliverable', {
+      callId: input.callId,
+      recoveryId: input.recoveryId,
+      code: input.code,
+      ownerNotified,
+    });
+
+    return {
+      outcome: 'send_rejected',
+      recoveryId: input.recoveryId,
+      code: input.code,
+      ownerNotified,
+      error: input.error,
     };
   }
 

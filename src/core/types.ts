@@ -5,6 +5,8 @@
  * It must stay free of any transport, storage or vendor concern.
  */
 
+import type { MessagingFailureCode } from '../interfaces/messaging/messaging-port.js';
+
 /**
  * Normalized end-of-call event. Every intake adapter (Vapi webhook today,
  * anything else later) maps its raw payload onto exactly this shape.
@@ -86,7 +88,21 @@ export type HandleResult =
       /** False when the customer was reached but the owner notification failed. */
       ownerNotified: boolean;
     }
-  | { outcome: 'send_failed'; recoveryId: string; error: string };
+  /** Temporary failure: the recovery stays `pending` and a retry will finish it. */
+  | { outcome: 'send_failed'; recoveryId: string; error: string }
+  /**
+   * Permanent failure: this customer cannot be reached on WhatsApp at all.
+   * Retrying is pointless, so the recovery is closed and the owner is asked to
+   * call back by hand.
+   */
+  | {
+      outcome: 'send_rejected';
+      recoveryId: string;
+      code: MessagingFailureCode;
+      /** False when even the fallback notification to the owner failed. */
+      ownerNotified: boolean;
+      error: string;
+    };
 
 /** Injected clock. Returns an ISO timestamp. */
 export type Clock = () => string;

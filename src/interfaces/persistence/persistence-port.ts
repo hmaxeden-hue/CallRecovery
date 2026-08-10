@@ -57,6 +57,12 @@ export interface CallRecoveryRepo {
   /** @throws {RecoveryIdConflictError} when recoveryId is taken. */
   create(input: CreateRecoveryInput): Promise<CreateRecoveryResult>;
   markNotified(recoveryId: string, notifiedAt: string): Promise<void>;
+  /**
+   * Ends a recovery without having reached the customer. `notifiedAt` stays
+   * null on purpose — nobody was notified, and the timestamp must not claim
+   * otherwise.
+   */
+  markClosed(recoveryId: string, closedAt: string): Promise<void>;
 }
 
 export interface PersistencePort {

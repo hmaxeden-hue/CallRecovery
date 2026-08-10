@@ -1,9 +1,13 @@
 /**
  * Messaging fake that records what was sent and can be told to fail.
- * The console-logging stub adapter for local development arrives in step 2.
+ * The console-logging stub adapter is the development default; this one adds
+ * assertions and controllable failures.
  */
 
-import type { MessagingAdapter, OutboundMessage } from '../../src/interfaces/messaging/messaging-port.js';
+import type {
+  MessagingAdapter,
+  OutboundMessage,
+} from '../../src/interfaces/messaging/messaging-port.js';
 
 export type RecordedMessage = OutboundMessage & { channel: 'customer' | 'owner' };
 

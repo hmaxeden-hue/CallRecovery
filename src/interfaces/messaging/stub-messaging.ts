@@ -29,9 +29,19 @@ export class StubMessaging implements MessagingAdapter {
   }
 
   private print(channel: 'customer' | 'owner', message: OutboundMessage): void {
+    const variables = message.template.variables
+      .map((value, index) => `{{${index + 1}}}=${value}`)
+      .join(' ');
+
+    // Both representations are printed: the wording a human should proof-read,
+    // and the template payload a real provider would actually send.
     this.write(
       `[whatsapp:stub] channel=${channel} to=${message.toPhone} ref=${message.recoveryId}\n` +
-        `  ${message.body}`,
+        `  template=${message.template.key} lang=${message.template.language} ${variables}\n` +
+        message.body
+          .split('\n')
+          .map((line) => `  ${line}`)
+          .join('\n'),
     );
   }
 }

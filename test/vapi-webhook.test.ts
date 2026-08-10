@@ -15,6 +15,7 @@ import {
 } from '../src/interfaces/intake/vapi-webhook.js';
 import { END_OF_CALL_TYPE } from '../src/interfaces/intake/vapi-mapping.js';
 import { SHARED_SECRET_HEADER } from '../src/interfaces/intake/vapi-signature.js';
+import { MessagingError } from '../src/interfaces/messaging/messaging-port.js';
 import { InMemoryPersistence } from '../src/interfaces/persistence/in-memory-persistence.js';
 import { RecordingMessaging } from './fakes/recording-messaging.js';
 
@@ -155,6 +156,26 @@ describe('POST /webhooks/vapi', () => {
       retriedPending: true,
     });
     expect(messaging.customerMessages).toHaveLength(1);
+  });
+
+  it('answers 200 when the customer is permanently unreachable', async () => {
+    // A Vapi retry would only repeat the same rejection; the owner has been
+    // told to call back instead.
+    messaging.failCustomer = new MessagingError('not a WhatsApp user', {
+      code: 'not_on_whatsapp',
+      retryable: false,
+    });
+
+    const response = await authorized(body());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: 'send_rejected',
+      code: 'not_on_whatsapp',
+      ownerNotified: true,
+    });
+    expect(persistence.listRecoveries()[0]?.status).toBe('closed');
+    expect(messaging.ownerMessages[0]?.template.key).toBe('owner_undeliverable');
   });
 
   it('answers 500 when the service throws unexpectedly', async () => {
