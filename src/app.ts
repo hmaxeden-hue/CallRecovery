@@ -13,6 +13,7 @@ import type { Logger } from './core/types.js';
 import { createConsoleLogger } from './logger.js';
 import type { MessagingAdapter } from './interfaces/messaging/messaging-port.js';
 import { StubMessaging } from './interfaces/messaging/stub-messaging.js';
+import { createTwilioMessaging } from './interfaces/messaging/twilio-messaging.js';
 import { SqlitePersistence } from './interfaces/persistence/sqlite-persistence.js';
 
 export type App = {
@@ -28,13 +29,18 @@ function createMessaging(config: AppConfig, logger: Logger): MessagingAdapter {
   switch (config.whatsappProvider) {
     case 'stub':
       return new StubMessaging();
-    case 'twilio':
+    case 'twilio': {
+      // config.twilio is guaranteed present by the conditional env validation;
+      // the check keeps that guarantee honest rather than asserting it away.
+      if (!config.twilio) throw new Error('Twilio-Konfiguration fehlt trotz WHATSAPP_PROVIDER=twilio');
+      return createTwilioMessaging(config.twilio, { logger });
+    }
     case 'meta_cloud':
       // Failing loudly beats silently falling back to the stub and letting an
       // operator believe customers were messaged.
       throw new Error(
-        `WHATSAPP_PROVIDER="${config.whatsappProvider}" ist in Phase 1 noch nicht implementiert. ` +
-          'Bitte WHATSAPP_PROVIDER=stub setzen.',
+        `WHATSAPP_PROVIDER="${config.whatsappProvider}" ist noch nicht implementiert. ` +
+          'Bitte WHATSAPP_PROVIDER=stub oder twilio setzen.',
       );
     default: {
       const exhaustive: never = config.whatsappProvider;

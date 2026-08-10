@@ -2,12 +2,17 @@
  * Environment configuration, validated once at startup.
  *
  * A missing or malformed variable must stop the process with a message that
- * names every problem at once — not one restart per typo.
+ * names every problem at once — not one restart per typo. Provider credentials
+ * are validated conditionally: switching WHATSAPP_PROVIDER to twilio makes the
+ * Twilio variables mandatory in the same pass, so the process never starts
+ * half-configured.
  */
 
 import { z } from 'zod';
 
 import { normalizePhone } from './core/phone.js';
+import type { TemplateKey } from './core/messages.js';
+import type { TwilioConfig } from './interfaces/messaging/twilio-messaging.js';
 
 const phoneSchema = z
   .string()
@@ -37,6 +42,25 @@ const envSchema = z.object({
   TIMEZONE: timeZoneSchema.default('Europe/Zurich'),
 });
 
+/** Content SIDs are template ids from the Twilio Content Template Builder. */
+const contentSidSchema = z
+  .string()
+  .min(1, 'darf nicht leer sein')
+  .refine((value) => value.startsWith('HX'), 'muss eine Twilio Content SID sein (beginnt mit "HX")');
+
+const twilioEnvSchema = z.object({
+  TWILIO_ACCOUNT_SID: z
+    .string()
+    .min(1, 'darf nicht leer sein')
+    .refine((value) => value.startsWith('AC'), 'muss mit "AC" beginnen'),
+  TWILIO_AUTH_TOKEN: z.string().min(1, 'darf nicht leer sein'),
+  TWILIO_WHATSAPP_FROM: phoneSchema,
+  TWILIO_CONTENT_SID_CUSTOMER_MISSED_CALL: contentSidSchema,
+  TWILIO_CONTENT_SID_CUSTOMER_INCOMPLETE_ORDER: contentSidSchema,
+  TWILIO_CONTENT_SID_OWNER_LOST_ORDER: contentSidSchema,
+  TWILIO_CONTENT_SID_OWNER_UNDELIVERABLE: contentSidSchema,
+});
+
 export type WhatsappProvider = z.infer<typeof envSchema>['WHATSAPP_PROVIDER'];
 export type VapiSignatureMode = z.infer<typeof envSchema>['VAPI_SIGNATURE_MODE'];
 
@@ -49,6 +73,8 @@ export type AppConfig = {
   databasePath: string;
   port: number;
   timeZone: string;
+  /** Present exactly when whatsappProvider is "twilio". */
+  twilio?: TwilioConfig;
 };
 
 export class ConfigError extends Error {
@@ -58,19 +84,45 @@ export class ConfigError extends Error {
   }
 }
 
+function describeIssues(error: z.ZodError): string[] {
+  return error.issues.map((issue) => {
+    const key = issue.path.join('.') || '(unbekannt)';
+    const detail = issue.code === 'invalid_type' ? 'fehlt' : issue.message;
+    return `${key}: ${detail}`;
+  });
+}
+
+function toTwilioConfig(parsed: z.infer<typeof twilioEnvSchema>): TwilioConfig {
+  const contentSids: Record<TemplateKey, string> = {
+    customer_missed_call: parsed.TWILIO_CONTENT_SID_CUSTOMER_MISSED_CALL,
+    customer_incomplete_order: parsed.TWILIO_CONTENT_SID_CUSTOMER_INCOMPLETE_ORDER,
+    owner_lost_order: parsed.TWILIO_CONTENT_SID_OWNER_LOST_ORDER,
+    owner_undeliverable: parsed.TWILIO_CONTENT_SID_OWNER_UNDELIVERABLE,
+  };
+
+  return {
+    accountSid: parsed.TWILIO_ACCOUNT_SID,
+    authToken: parsed.TWILIO_AUTH_TOKEN,
+    whatsappFrom: parsed.TWILIO_WHATSAPP_FROM,
+    contentSids,
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const result = envSchema.safeParse(env);
+  const base = envSchema.safeParse(env);
+  const problems = base.success ? [] : describeIssues(base.error);
 
-  if (!result.success) {
-    const problems = result.error.issues.map((issue) => {
-      const key = issue.path.join('.') || '(unbekannt)';
-      const detail = issue.code === 'invalid_type' ? 'fehlt' : issue.message;
-      return `${key}: ${detail}`;
-    });
-    throw new ConfigError(problems);
-  }
+  // Provider credentials are checked in the same pass, so a fresh install sees
+  // every missing variable at once instead of discovering them one restart at
+  // a time. `env` is read directly because base parsing may have failed.
+  const wantsTwilio = (env['WHATSAPP_PROVIDER'] ?? 'stub') === 'twilio';
+  const twilio = wantsTwilio ? twilioEnvSchema.safeParse(env) : null;
+  if (twilio && !twilio.success) problems.push(...describeIssues(twilio.error));
 
-  const parsed = result.data;
+  if (problems.length > 0) throw new ConfigError(problems);
+  if (!base.success) throw new ConfigError(['unbekannter Konfigurationsfehler']);
+
+  const parsed = base.data;
   return {
     vapiWebhookSecret: parsed.VAPI_WEBHOOK_SECRET,
     vapiSignatureMode: parsed.VAPI_SIGNATURE_MODE,
@@ -79,6 +131,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     databasePath: parsed.DATABASE_PATH,
     port: parsed.PORT,
     timeZone: parsed.TIMEZONE,
+    ...(twilio?.success ? { twilio: toTwilioConfig(twilio.data) } : {}),
   };
 }
 

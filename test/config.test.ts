@@ -43,6 +43,61 @@ describe('loadConfig', () => {
     }
   });
 
+  it('leaves twilio config absent for the stub provider', () => {
+    expect(loadConfig(validEnv).twilio).toBeUndefined();
+  });
+
+  describe('with WHATSAPP_PROVIDER=twilio', () => {
+    const twilioEnv = {
+      ...validEnv,
+      WHATSAPP_PROVIDER: 'twilio',
+      TWILIO_ACCOUNT_SID: 'ACxxx',
+      TWILIO_AUTH_TOKEN: 'token',
+      TWILIO_WHATSAPP_FROM: '+41445556677',
+      TWILIO_CONTENT_SID_CUSTOMER_MISSED_CALL: 'HX1',
+      TWILIO_CONTENT_SID_CUSTOMER_INCOMPLETE_ORDER: 'HX2',
+      TWILIO_CONTENT_SID_OWNER_LOST_ORDER: 'HX3',
+      TWILIO_CONTENT_SID_OWNER_UNDELIVERABLE: 'HX4',
+    };
+
+    it('builds the twilio config with a content sid per template key', () => {
+      expect(loadConfig(twilioEnv).twilio).toEqual({
+        accountSid: 'ACxxx',
+        authToken: 'token',
+        whatsappFrom: '+41445556677',
+        contentSids: {
+          customer_missed_call: 'HX1',
+          customer_incomplete_order: 'HX2',
+          owner_lost_order: 'HX3',
+          owner_undeliverable: 'HX4',
+        },
+      });
+    });
+
+    it('refuses to start when credentials are missing', () => {
+      expect(() => loadConfig({ ...validEnv, WHATSAPP_PROVIDER: 'twilio' })).toThrow(ConfigError);
+    });
+
+    it('names base and provider problems in the same pass', () => {
+      try {
+        loadConfig({ WHATSAPP_PROVIDER: 'twilio', OWNER_PHONE: '+41790000000' });
+        expect.unreachable('should have thrown');
+      } catch (error) {
+        const problems = (error as ConfigError).problems.join('\n');
+        expect(problems).toContain('VAPI_WEBHOOK_SECRET');
+        expect(problems).toContain('TWILIO_ACCOUNT_SID');
+        expect(problems).toContain('TWILIO_CONTENT_SID_OWNER_UNDELIVERABLE');
+      }
+    });
+
+    it('catches pasted ids of the wrong kind', () => {
+      expect(() => loadConfig({ ...twilioEnv, TWILIO_ACCOUNT_SID: 'SKxxx' })).toThrow(/AC/);
+      expect(() =>
+        loadConfig({ ...twilioEnv, TWILIO_CONTENT_SID_OWNER_LOST_ORDER: 'MG123' }),
+      ).toThrow(/HX/);
+    });
+  });
+
   it('rejects an unknown provider, signature mode or time zone', () => {
     expect(() => loadConfig({ ...validEnv, WHATSAPP_PROVIDER: 'signal' })).toThrow(ConfigError);
     expect(() => loadConfig({ ...validEnv, VAPI_SIGNATURE_MODE: 'none' })).toThrow(ConfigError);

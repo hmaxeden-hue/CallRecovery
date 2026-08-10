@@ -1,4 +1,4 @@
-# Call Recovery — Phase 1
+# Call Recovery
 
 Kein verpasster Anruf soll mehr zu einer verlorenen Bestellung führen.
 
@@ -7,7 +7,9 @@ Bestellung, schickt dieser Dienst dem Anrufer automatisch eine WhatsApp-Nachrich
 mit einer kurzen Referenz (`R-7F3K`) und benachrichtigt den Betreiber. Alles
 lokal-first: SQLite-Datei, keine Cloud-Abhängigkeit, kein Framework-Ballast.
 
-Phase 1 ist bewusst schmal — sie deckt genau den Teil mit dem messbaren ROI ab.
+Bewusst schmal gehalten: nur der Teil mit dem messbaren ROI, dafür produktiv
+einsetzbar. Versand läuft wahlweise über einen Konsolen-Stub oder echtes
+WhatsApp via Twilio.
 
 ## Setup
 
@@ -16,7 +18,7 @@ Voraussetzung: Node.js ≥ 20 (getestet mit 22).
 ```bash
 npm install
 cp .env.example .env      # ausfüllen, siehe unten
-npm test                  # 88 Tests
+npm test                  # 145 Tests
 npm run dev               # Server auf http://localhost:3000
 ```
 
@@ -30,11 +32,16 @@ einmal — nicht eines pro Neustart.
 |---|---|---|---|
 | `VAPI_WEBHOOK_SECRET` | ja | — | Secret der Vapi-Server-URL, kommt als `x-vapi-secret` zurück |
 | `VAPI_SIGNATURE_MODE` | nein | `shared_secret` | `shared_secret` oder `hmac_sha256` |
-| `WHATSAPP_PROVIDER` | nein | `stub` | `stub` loggt nur; `twilio`/`meta_cloud` folgen in Phase 2 |
+| `WHATSAPP_PROVIDER` | nein | `stub` | `stub` loggt nur; `twilio` versendet echt; `meta_cloud` noch nicht gebaut |
 | `OWNER_PHONE` | ja | — | Zielnummer der Owner-Benachrichtigung, E.164 |
 | `DATABASE_PATH` | nein | `./data/recovery.sqlite` | SQLite-Datei, Verzeichnis wird angelegt |
 | `PORT` | nein | `3000` | HTTP-Port |
 | `TIMEZONE` | nein | `Europe/Zurich` | Zeitzone für Uhrzeiten in der Owner-Meldung |
+
+Mit `WHATSAPP_PROVIDER=twilio` kommen sieben weitere Pflichtvariablen dazu
+(`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` und vier
+`TWILIO_CONTENT_SID_*`). Sie werden im selben Durchgang geprüft — ein frisches
+Setup sieht alle fehlenden Werte auf einmal, nicht einen pro Neustart.
 
 `OWNER_PHONE` wird normalisiert: `0041 79 000 00 00` wird zu `+41790000000`.
 
@@ -48,6 +55,7 @@ einmal — nicht eines pro Neustart.
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run build` / `npm start` | Kompilieren und kompiliert starten |
 | `npm run simulate` | End-to-End ohne HTTP (siehe unten) |
+| `npm run send-test` | Eine echte Nachricht über den konfigurierten Provider |
 
 ## Ausprobieren
 
@@ -99,10 +107,20 @@ Im Server-Log stehen beide Nachrichten im Klartext:
 
 ```
 [whatsapp:stub] channel=customer to=+41791234567 ref=R-MPP4
-  Guten Tag, Ihre Bestellung ist noch nicht abgeschlossen. Antworten Sie hier, um sie fertigzustellen. Ihre Referenz: R-MPP4.
+  template=customer_incomplete_order lang=de {{1}}=R-MPP4
+  Guten Tag, Ihre Bestellung mit der Referenz R-MPP4 ist noch nicht abgeschlossen. Antworten Sie hier, um sie fertigzustellen. Vielen Dank!
 [whatsapp:stub] channel=owner to=+41790000000 ref=R-MPP4
-  ⚠️ Mögliche verlorene Bestellung — Nr.: +41791234567 · Name: Meier · Grund: Unvollständige Bestellung · Ref: R-MPP4 · Zeit: 14:32.
+  template=owner_lost_order lang=de {{1}}=+41791234567 {{2}}=Meier {{3}}=Unvollständige Bestellung {{4}}=R-MPP4 {{5}}=14:32
+  ⚠️ Mögliche verlorene Bestellung
+  Nummer: +41791234567
+  Name: Meier
+  Grund: Unvollständige Bestellung
+  Referenz: R-MPP4
+  Zeit: 14:32 Uhr
 ```
+
+Der Stub zeigt beides: das Template-Payload, das ein echter Provider verschickt,
+und darunter den Text, den der Empfänger liest.
 
 Derselbe Befehl ein zweites Mal ausgeführt sendet **nichts** mehr:
 
@@ -121,7 +139,100 @@ Bewusst danach gewählt, wie Vapi darauf reagiert:
 | `200` | benachrichtigt, Duplikat, übersprungen, ignorierter Nachrichtentyp | kein Retry |
 | `401` | Secret fehlt oder falsch | kein Retry |
 | `400` | kaputtes JSON oder nicht mappbares Payload | Retry hilft nicht |
-| `503` | Kunde konnte nicht erreicht werden | Retry erwünscht — wir sind idempotent |
+| `503` | Kunde vorübergehend nicht erreichbar | Retry erwünscht — wir sind idempotent |
+| `200` | Kunde dauerhaft nicht erreichbar (`send_rejected`) | Retry zwecklos, Owner wurde informiert |
+
+## WhatsApp scharfschalten
+
+### Die Regel, die alles bestimmt
+
+WhatsApp erlaubt frei formulierten Text nur innerhalb von 24 Stunden nach der
+letzten Nachricht **des Kunden auf WhatsApp**. Ein Telefonanruf öffnet dieses
+Fenster nicht. Jede Recovery-Nachricht ist deshalb business-initiated und muss
+als vorab genehmigtes **Template** verschickt werden. Ohne genehmigte Templates
+geht keine einzige Nachricht raus — das ist der lange Pol beim Setup.
+
+### Templates einreichen
+
+Im Twilio Content Template Builder anlegen, Sprache `de`, zur WhatsApp-Freigabe
+einreichen. Jedes Template liefert eine Content SID (`HX…`) für die `.env`.
+
+**1. `verpasster_anruf_de`** → `TWILIO_CONTENT_SID_CUSTOMER_MISSED_CALL`
+```
+Guten Tag, wir haben Ihren Anruf leider verpasst. Möchten Sie Ihre Bestellung
+schnell per WhatsApp aufgeben? Antworten Sie einfach direkt hier – wir kümmern
+uns darum. Ihre Referenz: {{1}}. Vielen Dank!
+```
+
+**2. `bestellung_unvollstaendig_de`** → `TWILIO_CONTENT_SID_CUSTOMER_INCOMPLETE_ORDER`
+```
+Guten Tag, Ihre Bestellung mit der Referenz {{1}} ist noch nicht abgeschlossen.
+Antworten Sie hier, um sie fertigzustellen. Vielen Dank!
+```
+
+**3. `owner_verlorene_bestellung_de`** → `TWILIO_CONTENT_SID_OWNER_LOST_ORDER`
+```
+⚠️ Mögliche verlorene Bestellung
+Nummer: {{1}}
+Name: {{2}}
+Grund: {{3}}
+Referenz: {{4}}
+Zeit: {{5}} Uhr
+```
+
+**4. `owner_whatsapp_unzustellbar_de`** → `TWILIO_CONTENT_SID_OWNER_UNDELIVERABLE`
+```
+⚠️ WhatsApp nicht zustellbar
+Nummer: {{1}}
+Referenz: {{2}}
+Fehler: {{3}}
+Bitte den Kunden manuell zurückrufen.
+```
+
+Templates 2–4 sind klar *Utility*. Template 1 kann als *Marketing* eingestuft
+werden, weil es zu einer neuen Bestellung einlädt. Falls das stört, diese
+Variante zusätzlich einreichen — sie bindet die Nachricht an ein konkretes
+Ereignis statt an ein Angebot:
+
+```
+Guten Tag, Ihr Anruf bei uns um {{1}} Uhr ist leider abgebrochen. Antworten Sie
+direkt hier, um Ihre Bestellung aufzunehmen. Ihre Referenz: {{2}}. Vielen Dank!
+```
+
+Die Reihenfolge der Variablen muss zu `src/core/messages.ts` passen — die Tests
+dort prüfen sie.
+
+### Ersten echten Versand auslösen
+
+```bash
+npm run send-test -- --to +41791234567                              # Kunde, verpasster Anruf
+npm run send-test -- --to +41791234567 --template customer_incomplete_order
+npm run send-test -- --owner                                        # an OWNER_PHONE
+```
+
+Mit `WHATSAPP_PROVIDER=stub` wird nur geloggt — der Befehl ist also auch ohne
+Credentials gefahrlos. In der Twilio-Sandbox muss die Zielnummer vorher einmalig
+den Join-Code an die Sandbox-Nummer schicken; das ist Twilios Opt-in, kein Fehler.
+
+### Was ein erfolgreicher Versand bedeutet
+
+Ein `201 Created` von Twilio heißt **angenommen**, nicht **zugestellt**. Die
+Zustellbestätigung käme über einen Status-Callback, der bewusst noch nicht
+gebaut ist.
+
+### Fehlerbehandlung
+
+| Klasse | Beispiele | Recovery-Status | Antwort an Vapi |
+|---|---|---|---|
+| transient | 429, 5xx, Timeout, Netzfehler | bleibt `pending` | `503`, Retry erwünscht |
+| permanent | Nummer nicht bei WhatsApp, Template nicht frei, 401 | wird `closed` | `200`, Retry zwecklos |
+
+Transiente Fehler werden im Adapter bis zu dreimal mit Exponential-Backoff und
+Jitter wiederholt; ein `Retry-After` des Providers schlägt die eigene Kurve.
+
+Bei einem **permanenten** Fehler bekommt der Owner Template 4 mit der Bitte um
+Rückruf. Ohne das würde genau der häufigste Fall — Nummer ohne WhatsApp — den
+Anruf still verschwinden lassen.
 
 ## Architektur
 
@@ -141,8 +252,11 @@ src/
       vapi-signature.ts     # Shared Secret / HMAC, timing-safe
       vapi-mapping.ts       # rohes Vapi-Payload -> IncomingCallEvent
     messaging/
-      messaging-port.ts     # MessagingAdapter
+      messaging-port.ts     # MessagingAdapter + MessagingError
+      retry.ts              # Backoff mit Jitter
+      whatsapp-http.ts      # gemeinsame HTTP-Basis (Timeout, Retry, Sanitizing)
       stub-messaging.ts     # loggt Nachrichten (Default)
+      twilio-messaging.ts   # echter Versand über Twilio
     persistence/
       persistence-port.ts   # CustomerRepo + CallRecoveryRepo
       sqlite-persistence.ts # better-sqlite3 (Default)
@@ -190,13 +304,14 @@ Die Kundennachricht geht vor der Owner-Meldung raus. Scheitert die Owner-Meldung
 bleibt die Recovery trotzdem `notified` (`ownerNotified: false` im Log) — ein
 erreichter Kunde wird nicht wegen einer fehlgeschlagenen internen Notiz verworfen.
 
-## Nicht in Phase 1
+## Noch nicht gebaut
 
 Bewusst ausgeklammert, die Ports bleiben offen:
 
 - vollständige Vapi-Agent-Konfiguration
 - Order-Placement-Workflow
 - Resume-Konversation (Kundenantwort verarbeiten)
-- echter WhatsApp-Provider (Twilio, Meta Cloud API)
+- Meta Cloud API als zweiter Provider (eine Datei, eine Zeile im Wiring)
+- Zustellstatus-Callbacks (`sent`/`delivered`/`read`/`failed`)
 - Airtable-Persistenz
 - Dashboard / UI
